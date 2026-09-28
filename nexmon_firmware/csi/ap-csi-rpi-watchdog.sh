@@ -11,10 +11,13 @@ ROUTER_LABEL=${AP_CSI_ROUTER_LABEL:-AP+CSI router}
 PASSWORD_FILE=${AP_CSI_PASSWORD_FILE:-/home/wiloc/.config/wiros/ap_csi_router_password}
 KNOWN_HOSTS=${AP_CSI_KNOWN_HOSTS:-/home/wiloc/.ssh/ap_csi_router_known_hosts}
 REMOTE_COMMAND=${AP_CSI_REMOTE_COMMAND:-/jffs/csi/ap-csi-autostart.sh}
+RADIO_INTERFACE=${AP_CSI_RADIO_INTERFACE:-eth6}
+EXPECTED_SSID=${AP_CSI_EXPECTED_SSID:-WIRES-AP}
 BOOT_SETTLE=${AP_CSI_BOOT_SETTLE:-120}
 INTERVAL=${AP_CSI_HEALTH_INTERVAL:-60}
 RETRY_DELAY=${AP_CSI_RETRY_DELAY:-20}
 COMMAND_TIMEOUT=${AP_CSI_COMMAND_TIMEOUT:-180}
+HEALTH_TIMEOUT=${AP_CSI_HEALTH_TIMEOUT:-20}
 MAX_FAILURES=${AP_CSI_MAX_FAILURES:-3}
 
 SSH=${AP_CSI_SSH:-/usr/bin/ssh}
@@ -26,6 +29,7 @@ LOGGER=${AP_CSI_LOGGER:-/usr/bin/logger}
 
 failures=0
 last_state=
+configured_router_uptime=
 
 announce() {
     state=$1
@@ -38,7 +42,8 @@ announce() {
 }
 
 router_ssh() {
-    "$TIMEOUT" --signal=TERM --kill-after=10 "$COMMAND_TIMEOUT" \
+    command_timeout=${2:-$COMMAND_TIMEOUT}
+    "$TIMEOUT" --signal=TERM --kill-after=10 "$command_timeout" \
         "$SSHPASS" -f "$PASSWORD_FILE" "$SSH" -n \
         -b "$SOURCE_IP" \
         -o BatchMode=no \
@@ -53,6 +58,20 @@ router_ssh() {
         -o StrictHostKeyChecking=accept-new \
         -o UserKnownHostsFile="$KNOWN_HOSTS" \
         "$ROUTER_USER@$ROUTER_HOST" "$1"
+}
+
+router_health_check() {
+    # Keep the periodic probe read-only.  It verifies the complete AP+CSI data
+    # path that can fail while the router itself remains reachable over LAN.
+    router_ssh "
+        export PATH=/sbin:/usr/sbin:/bin:/usr/bin:\$PATH
+        ssid=\$(/usr/sbin/wl -i '$RADIO_INTERFACE' ssid 2>/dev/null) || exit 10
+        [ \"\$ssid\" = '$EXPECTED_SSID' ] || exit 11
+        [ \"\$(/usr/sbin/wl -i '$RADIO_INTERFACE' bss 2>/dev/null)\" = up ] || exit 12
+        /sbin/brctl show br0 2>/dev/null | /bin/grep -qw '$RADIO_INTERFACE' || exit 13
+        /jffs/csi/nexutil -I '$RADIO_INTERFACE' -g501 -l20 2>/dev/null |
+            /bin/grep -q '^0x000000: 01 00' || exit 14
+    " "$HEALTH_TIMEOUT"
 }
 
 reboot_router() {
@@ -107,9 +126,34 @@ while :; do
         continue
     fi
 
+    # Once configuration succeeds, probe the live AP and CSI state on every
+    # interval.  Do not re-run the installer during the same boot: a wedged
+    # firmware/driver needs a controlled reboot, not more live driver changes.
+    if [ -n "$configured_router_uptime" ] \
+        && [ "$router_uptime" -ge "$configured_router_uptime" ]; then
+        if router_health_check >/dev/null 2>&1; then
+            failures=0
+            announce healthy "$ROUTER_LABEL AP, bridge, and CSI state are healthy"
+            "$SLEEP" "$INTERVAL"
+            continue
+        else
+            rc=$?
+            failures=$((failures + 1))
+            announce health_failed "$ROUTER_LABEL live AP+CSI health check failed (rc=$rc, attempt=$failures/$MAX_FAILURES)"
+            if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] \
+                || [ "$failures" -ge "$MAX_FAILURES" ]; then
+                reboot_router
+            else
+                "$SLEEP" "$RETRY_DELAY"
+            fi
+            continue
+        fi
+    fi
+
     if router_ssh "$REMOTE_COMMAND"; then
+        configured_router_uptime=$router_uptime
         failures=0
-        announce healthy "$ROUTER_LABEL AP+CSI driver is healthy"
+        announce healthy "$ROUTER_LABEL CSI driver/channel/filter are healthy"
         "$SLEEP" "$INTERVAL"
         continue
     else
