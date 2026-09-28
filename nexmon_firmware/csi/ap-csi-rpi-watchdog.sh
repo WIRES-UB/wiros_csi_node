@@ -12,7 +12,6 @@ PASSWORD_FILE=${AP_CSI_PASSWORD_FILE:-/home/wiloc/.config/wiros/ap_csi_router_pa
 KNOWN_HOSTS=${AP_CSI_KNOWN_HOSTS:-/home/wiloc/.ssh/ap_csi_router_known_hosts}
 REMOTE_COMMAND=${AP_CSI_REMOTE_COMMAND:-/jffs/csi/ap-csi-autostart.sh}
 RADIO_INTERFACE=${AP_CSI_RADIO_INTERFACE:-eth6}
-EXPECTED_SSID=${AP_CSI_EXPECTED_SSID:-WIRES-AP}
 BOOT_SETTLE=${AP_CSI_BOOT_SETTLE:-120}
 INTERVAL=${AP_CSI_HEALTH_INTERVAL:-60}
 RETRY_DELAY=${AP_CSI_RETRY_DELAY:-20}
@@ -61,16 +60,14 @@ router_ssh() {
 }
 
 router_health_check() {
-    # Keep the periodic probe read-only.  It verifies the complete AP+CSI data
-    # path that can fail while the router itself remains reachable over LAN.
+    # Do not issue wl/nexutil ioctls here.  The concurrent firmware can stop
+    # answering them even while forwarding traffic, and probing a wedged radio
+    # can make recovery worse.  These kernel/bridge checks are read-only and
+    # detect the observed failure mode where eth6 fell out of br0.
     router_ssh "
-        export PATH=/sbin:/usr/sbin:/bin:/usr/bin:\$PATH
-        ssid=\$(/usr/sbin/wl -i '$RADIO_INTERFACE' ssid 2>/dev/null) || exit 10
-        [ \"\$ssid\" = '$EXPECTED_SSID' ] || exit 11
-        [ \"\$(/usr/sbin/wl -i '$RADIO_INTERFACE' bss 2>/dev/null)\" = up ] || exit 12
-        /sbin/brctl show br0 2>/dev/null | /bin/grep -qw '$RADIO_INTERFACE' || exit 13
-        /jffs/csi/nexutil -I '$RADIO_INTERFACE' -g501 -l20 2>/dev/null |
-            /bin/grep -q '^0x000000: 01 00' || exit 14
+        [ -d '/sys/class/net/$RADIO_INTERFACE' ] || exit 10
+        /bin/grep -q '^dhd ' /proc/modules || exit 11
+        /sbin/brctl show br0 2>/dev/null | /bin/grep -qw '$RADIO_INTERFACE' || exit 12
     " "$HEALTH_TIMEOUT"
 }
 
@@ -133,7 +130,7 @@ while :; do
         && [ "$router_uptime" -ge "$configured_router_uptime" ]; then
         if router_health_check >/dev/null 2>&1; then
             failures=0
-            announce healthy "$ROUTER_LABEL AP, bridge, and CSI state are healthy"
+            announce healthy "$ROUTER_LABEL radio interface and bridge are healthy"
             "$SLEEP" "$INTERVAL"
             continue
         else
