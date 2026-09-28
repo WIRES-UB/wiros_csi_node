@@ -18,6 +18,10 @@ RETRY_DELAY=${AP_CSI_RETRY_DELAY:-20}
 COMMAND_TIMEOUT=${AP_CSI_COMMAND_TIMEOUT:-180}
 HEALTH_TIMEOUT=${AP_CSI_HEALTH_TIMEOUT:-20}
 MAX_FAILURES=${AP_CSI_MAX_FAILURES:-3}
+MAX_DRIVER_TIMEOUTS=${AP_CSI_MAX_DRIVER_TIMEOUTS:-10}
+MAX_REBOOTS=${AP_CSI_MAX_REBOOTS:-2}
+REBOOT_WINDOW=${AP_CSI_REBOOT_WINDOW:-900}
+REBOOT_COOLDOWN=${AP_CSI_REBOOT_COOLDOWN:-1800}
 
 SSH=${AP_CSI_SSH:-/usr/bin/ssh}
 SSHPASS=${AP_CSI_SSHPASS:-/usr/bin/sshpass}
@@ -25,10 +29,14 @@ PING=${AP_CSI_PING:-/usr/bin/ping}
 TIMEOUT=${AP_CSI_TIMEOUT:-/usr/bin/timeout}
 SLEEP=${AP_CSI_SLEEP:-/usr/bin/sleep}
 LOGGER=${AP_CSI_LOGGER:-/usr/bin/logger}
+DATE=${AP_CSI_DATE:-/usr/bin/date}
+SED=${AP_CSI_SED:-/usr/bin/sed}
 
 failures=0
 last_state=
-configured_router_uptime=
+configured_router_boot_id=
+reboot_count=0
+reboot_window_started=0
 
 announce() {
     state=$1
@@ -62,17 +70,41 @@ router_ssh() {
 router_health_check() {
     # Do not issue wl/nexutil ioctls here.  The concurrent firmware can stop
     # answering them even while forwarding traffic, and probing a wedged radio
-    # can make recovery worse.  These kernel/bridge checks are read-only and
-    # detect the observed failure mode where eth6 fell out of br0.
+    # can make recovery worse.  The AP does not require eth6 to appear in br0
+    # on this firmware, so detect the observed hang through its kernel timeout
+    # signature instead.  A small number can occur during successful startup,
+    # so require the repeated pattern seen in the actual firmware hang.  Router
+    # dmesg is reset on every boot.
     router_ssh "
         [ -d '/sys/class/net/$RADIO_INTERFACE' ] || exit 10
         /bin/grep -q '^dhd ' /proc/modules || exit 11
-        /sbin/brctl show br0 2>/dev/null | /bin/grep -qw '$RADIO_INTERFACE' || exit 12
+        timeout_count=\$(/bin/dmesg | /bin/grep -c 'timeout > MAX_CNTL_TX_TIMEOUT')
+        case \"\$timeout_count\" in ''|*[!0-9]*) exit 13 ;; esac
+        if [ \"\$timeout_count\" -ge '$MAX_DRIVER_TIMEOUTS' ]; then
+            exit 12
+        fi
     " "$HEALTH_TIMEOUT"
 }
 
 reboot_router() {
-    announce rebooting "$ROUTER_LABEL CSI driver unhealthy; requesting router reboot"
+    now=$("$DATE" +%s)
+    if [ "$reboot_window_started" -eq 0 ] \
+        || [ $((now - reboot_window_started)) -ge "$REBOOT_WINDOW" ]; then
+        reboot_window_started=$now
+        reboot_count=0
+    fi
+
+    if [ "$reboot_count" -ge "$MAX_REBOOTS" ]; then
+        announce recovery_paused "$ROUTER_LABEL remains unhealthy after $reboot_count reboots; pausing automatic recovery for ${REBOOT_COOLDOWN}s"
+        "$SLEEP" "$REBOOT_COOLDOWN"
+        reboot_count=0
+        reboot_window_started=0
+        failures=0
+        return 1
+    fi
+
+    reboot_count=$((reboot_count + 1))
+    announce "rebooting_$reboot_count" "$ROUTER_LABEL CSI driver unhealthy; requesting router reboot ($reboot_count/$MAX_REBOOTS in current window)"
     "$TIMEOUT" --signal=TERM --kill-after=5 15 \
         "$SSHPASS" -f "$PASSWORD_FILE" "$SSH" -n \
         -b "$SOURCE_IP" \
@@ -109,10 +141,19 @@ while :; do
         continue
     fi
 
-    router_uptime=$(router_ssh "cut -d. -f1 /proc/uptime" 2>/dev/null) || router_uptime=
+    router_state=$(router_ssh "cut -d. -f1 /proc/uptime; cat /proc/sys/kernel/random/boot_id" 2>/dev/null) || router_state=
+    router_uptime=$(printf '%s\n' "$router_state" | "$SED" -n '1p')
+    router_boot_id=$(printf '%s\n' "$router_state" | "$SED" -n '2p')
     case "$router_uptime" in
         ''|*[!0-9]*)
             announce ssh_wait "Waiting for SSH on $ROUTER_LABEL"
+            "$SLEEP" "$RETRY_DELAY"
+            continue
+            ;;
+    esac
+    case "$router_boot_id" in
+        ''|*[!0-9a-fA-F-]*)
+            announce boot_id_wait "Waiting for a valid boot ID from $ROUTER_LABEL"
             "$SLEEP" "$RETRY_DELAY"
             continue
             ;;
@@ -123,20 +164,20 @@ while :; do
         continue
     fi
 
-    # Once configuration succeeds, probe the live AP and CSI state on every
-    # interval.  Do not re-run the installer during the same boot: a wedged
+    # Once configuration succeeds, probe the radio's kernel state on
+    # every interval.  Do not re-run the installer during the same boot: a wedged
     # firmware/driver needs a controlled reboot, not more live driver changes.
-    if [ -n "$configured_router_uptime" ] \
-        && [ "$router_uptime" -ge "$configured_router_uptime" ]; then
+    if [ -n "$configured_router_boot_id" ] \
+        && [ "$router_boot_id" = "$configured_router_boot_id" ]; then
         if router_health_check >/dev/null 2>&1; then
             failures=0
-            announce healthy "$ROUTER_LABEL radio interface and bridge are healthy"
+            announce healthy "$ROUTER_LABEL radio interface and driver log are healthy"
             "$SLEEP" "$INTERVAL"
             continue
         else
             rc=$?
             failures=$((failures + 1))
-            announce health_failed "$ROUTER_LABEL live AP+CSI health check failed (rc=$rc, attempt=$failures/$MAX_FAILURES)"
+            announce "health_failed_$failures" "$ROUTER_LABEL live AP+CSI health check failed (rc=$rc, attempt=$failures/$MAX_FAILURES)"
             if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] \
                 || [ "$failures" -ge "$MAX_FAILURES" ]; then
                 reboot_router
@@ -148,7 +189,7 @@ while :; do
     fi
 
     if router_ssh "$REMOTE_COMMAND"; then
-        configured_router_uptime=$router_uptime
+        configured_router_boot_id=$router_boot_id
         failures=0
         announce healthy "$ROUTER_LABEL CSI driver/channel/filter are healthy"
         "$SLEEP" "$INTERVAL"
@@ -158,7 +199,7 @@ while :; do
     fi
 
     failures=$((failures + 1))
-    announce install_failed "$ROUTER_LABEL AP+CSI check failed (rc=$rc, attempt=$failures/$MAX_FAILURES)"
+    announce "install_failed_$failures" "$ROUTER_LABEL AP+CSI check failed (rc=$rc, attempt=$failures/$MAX_FAILURES)"
 
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$failures" -ge "$MAX_FAILURES" ]; then
         reboot_router
