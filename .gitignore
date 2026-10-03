@@ -3,5 +3,10 @@ cmake_build_debug/
 __pycache__/
 *.pyc
 .env
+*.env.example
+
+# Local-only documentation; keep only the repository root README tracked.
+*.md
+!/README.md
 
 src/pythonNoRos/config*.json
