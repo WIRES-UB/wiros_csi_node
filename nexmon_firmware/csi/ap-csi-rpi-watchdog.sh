@@ -18,7 +18,7 @@ RETRY_DELAY=${AP_CSI_RETRY_DELAY:-20}
 COMMAND_TIMEOUT=${AP_CSI_COMMAND_TIMEOUT:-180}
 HEALTH_TIMEOUT=${AP_CSI_HEALTH_TIMEOUT:-20}
 MAX_FAILURES=${AP_CSI_MAX_FAILURES:-3}
-MAX_DRIVER_TIMEOUTS=${AP_CSI_MAX_DRIVER_TIMEOUTS:-3}
+MAX_DRIVER_TIMEOUTS=${AP_CSI_MAX_DRIVER_TIMEOUTS:-10}
 MAX_REBOOTS=${AP_CSI_MAX_REBOOTS:-2}
 REBOOT_WINDOW=${AP_CSI_REBOOT_WINDOW:-900}
 REBOOT_COOLDOWN=${AP_CSI_REBOOT_COOLDOWN:-1800}
@@ -78,17 +78,7 @@ router_health_check() {
     router_ssh "
         [ -d '/sys/class/net/$RADIO_INTERFACE' ] || exit 10
         /bin/grep -q '^dhd ' /proc/modules || exit 11
-        timeout_count=\$(/bin/dmesg | /usr/bin/awk '
-            BEGIN { needle = \"timeout > MAX_CNTL_TX_TIMEOUT\" }
-            {
-                line = \$0
-                while ((position = index(line, needle)) != 0) {
-                    count++
-                    line = substr(line, position + length(needle))
-                }
-            }
-            END { print count + 0 }
-        ')
+        timeout_count=\$(/bin/dmesg | /bin/grep -c 'timeout > MAX_CNTL_TX_TIMEOUT')
         case \"\$timeout_count\" in ''|*[!0-9]*) exit 13 ;; esac
         if [ \"\$timeout_count\" -ge '$MAX_DRIVER_TIMEOUTS' ]; then
             exit 12
