@@ -9,12 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCAL_CONFIG = ROOT / "nexmon_firmware" / "csi" / "configcsi.sh"
 PASSWORD = os.environ["WIRES_PI_PASSWORD"]
 TARGETS = (
-    ("router-2", "100.103.185.11", "192.168.48.5"),
-    ("router-1", "100.95.115.44", "192.168.48.6"),
+    ("router-2", "10.84.118.167", "192.168.48.5", 36, 80),
+    ("router-3", "10.84.121.7", "192.168.48.1", 36, 80),
 )
 
 
-for name, pi_host, router_host in TARGETS:
+for name, pi_host, router_host, channel, bandwidth in TARGETS:
     print(f"=== {name} ===")
     pi = paramiko.SSHClient()
     pi.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -52,7 +52,7 @@ for name, pi_host, router_host in TARGETS:
             f"cp /jffs/csi/configcsi.sh {backup} && "
             f"mv {temporary} /jffs/csi/configcsi.sh && "
             "chmod 755 /jffs/csi/configcsi.sh && "
-            "/jffs/csi/setup.sh 60 80 4 94:45:60:ba:11:da 2>&1"
+            f"/jffs/csi/setup.sh {channel} {bandwidth} 4 2>&1"
         )
         _, stdout, stderr = router.exec_command(command, timeout=90)
         output = stdout.read().decode(errors="replace")

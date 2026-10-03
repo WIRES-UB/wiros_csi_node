@@ -46,7 +46,9 @@ DISABLED_NVRAM_PREFIXES=${AP_CSI_DISABLED_NVRAM_PREFIXES:-wl0}
 CHANNEL=${AP_CSI_CHANNEL:-36}
 BANDWIDTH=${AP_CSI_BANDWIDTH_MHZ:-80}
 TX_STREAMS=${AP_CSI_TX_STREAMS:-4}
-TARGET_MAC=${AP_CSI_TARGET_MAC:-94:45:60:ba:11:da}
+# Leave the firmware filter empty when more than one phone is allowed. The
+# paired RPi applies the exact source-MAC allowlist before publishing to MQTT.
+TARGET_MAC=${AP_CSI_TARGET_MAC:-}
 MIN_INTERVAL_MS=${AP_CSI_MIN_INTERVAL_MS:-${AP_CSI_PACKET_DELAY:-1}}
 RX_CORES=${AP_CSI_RX_CORES:-4}
 QUIESCE_PROCESSES=${AP_CSI_QUIESCE_PROCESSES:-"dhd_monitor roamast wlc_nt networkmap wps_monitor wpsaide wlceventd watchdog bwdpi_check cfg_server mastiff"}

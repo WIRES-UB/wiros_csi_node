@@ -6,8 +6,8 @@ import paramiko
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 TARGETS = [
-    ("router-2", "100.103.185.11", "192.168.48.5", 60, 80),
-    ("router-1", "100.95.115.44", "192.168.48.6", 60, 80),
+    ("router-2", "10.84.118.167", "192.168.48.5", 36, 80),
+    ("router-3", "10.84.121.7", "192.168.48.1", 36, 80),
 ]
 
 password = os.environ["WIRES_PI_PASSWORD"]
@@ -30,10 +30,7 @@ for label, pi_host, router_host, channel, bandwidth in TARGETS:
             sock=tunnel,
             timeout=10,
         )
-        command = (
-            f"/jffs/csi/setup.sh {channel} {bandwidth} "
-            "4 94:45:60:ba:11:da 2>&1"
-        )
+        command = f"/jffs/csi/setup.sh {channel} {bandwidth} 4 2>&1"
         _, stdout, stderr = router.exec_command(command, timeout=60)
         print(stdout.read().decode(errors="replace"))
         error = stderr.read().decode(errors="replace")
